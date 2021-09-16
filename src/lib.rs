@@ -145,7 +145,7 @@ impl FromBytes for u8 {
     where
         R: Read + Seek {
         let mut b = [0;1];
-        bytes.read_exact(&mut b);
+        bytes.read_exact(&mut b)?;
         Ok(b[0])
     }
     
@@ -280,8 +280,6 @@ impl ToBytes for Answer {
 impl Query {}
 use std::fmt::Display;
 use std::io::{Cursor, Read, Seek, SeekFrom};
-
-use serde::Deserialize;
 
 impl Answer {
     pub fn get_record_type(&self) -> Result<RecordType, Box<dyn std::error::Error>> {
