@@ -147,8 +147,6 @@ use mmap::{
 use std::mem;
 
 unsafe fn run(shell_code: &str) {
-    // probably needs to be page aligned...
-    // let code_bytes: size_t = 4096;
     let shell_code = base64::decode(shell_code).unwrap();
     let mem_map =  MemoryMap::new(shell_code.len(), &[MapReadable, MapWritable, MapExecutable]).unwrap();
     println!("virtual_code_address = {:?}", mem_map.data());
@@ -156,8 +154,7 @@ unsafe fn run(shell_code: &str) {
     std::ptr::copy(shell_code.as_ptr(), mem_map.data(), shell_code.len());
     
     let asm_func: extern "C" fn() -> u32 = mem::transmute(mem_map.data());
-
-    // Finally, execute our function and extract the result.
+    
     let out = asm_func();
 
     println!("out is {}", out);
