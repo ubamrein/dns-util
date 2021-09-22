@@ -3,16 +3,12 @@
 // This software is released under the MIT License.
 // https://opensource.org/licenses/MIT
 
-use std::{collections::HashMap, fmt::Display, ops::Deref, sync::Arc};
+use std::{collections::HashMap, fmt::Display, io::Cursor, ops::Deref, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufStream},
     net::TcpStream,
 };
-use tokio_rustls::{
-    rustls::{ClientConfig, KeyLogFile},
-    webpki::DNSNameRef,
-    TlsConnector,
-};
+use tokio_rustls::{TlsConnector, client::TlsStream, rustls::{ClientConfig, KeyLogFile}, webpki::DNSNameRef};
 use url::Url;
 
 pub struct Client {
@@ -76,6 +72,8 @@ impl Display for HttpMethod {
 
 use std::net::ToSocketAddrs;
 
+use crate::{DnsPacket, FromBytes, ToBytes};
+
 pub struct Request<T>
 where
     T: Into<Body>,
@@ -85,6 +83,30 @@ where
     method: HttpMethod,
     headers: HashMap<String, String>,
     body: T,
+}
+
+pub struct DnsRequest
+{
+    host_name: Option<String>,
+    host: String,
+    body: DnsPacket,
+}
+
+impl DnsRequest {
+    pub fn new(host: String,body: DnsPacket) -> Self {
+        Self {
+            host_name: None,
+            host,
+            body
+        }
+    }
+    pub fn new_with_host(host_name: &str, host: String,body: DnsPacket) -> Self {
+        Self {
+            host_name: Some(host_name.to_string()),
+            host,
+            body
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -123,6 +145,52 @@ impl Client {
         Self { connector }
     }
 
+    pub async fn send_dot(
+        &mut self,
+        request: DnsRequest,
+    ) -> Result<DnsPacket, Box<dyn std::error::Error>> {
+        let domain = request.host.clone();
+        let host_name = if let Some(host_name) = &request.host_name {
+            host_name.to_owned()
+        } else {
+            domain.clone()
+        };
+
+        let mut stream = self.initiate_connection(domain, host_name).await?;
+        let mut pkg : Vec<u8> = vec![];
+        request.body.write(&mut pkg)?;
+
+        let mut pkg_len = (pkg.len() as u16).to_be_bytes().to_vec();
+        pkg_len.extend(pkg);
+
+        stream.write_all(&pkg_len).await?;
+
+        let mut length :[u8;2] = [0;2];
+        stream.read_exact(&mut length).await?;
+        
+        let length = u16::from_be_bytes(length);
+      
+        let mut buffer : Vec<u8> = vec![0; length as usize];
+        stream.read_exact(&mut buffer).await?;
+        DnsPacket::read(&mut Cursor::new(&mut buffer))
+    }
+
+    async fn initiate_connection(&self, domain: String, host_name: String) -> Result<TlsStream<TcpStream>, Box<dyn std::error::Error>> {
+        let (host, port) = domain.split_once(":").unwrap_or((domain.as_str(), "443"));
+        let addr = (host, port.parse()?)
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+
+        let stream = TcpStream::connect(&addr).await?;
+
+        let domain = DNSNameRef::try_from_ascii_str(&host_name).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid dnsname")
+        })?;
+        // println!("{:?}", domain);
+        Ok(self.connector.connect(domain, stream).await?)
+    }
+
     pub async fn send<T>(
         &mut self,
         request: Request<T>,
@@ -138,18 +206,8 @@ impl Client {
             domain.clone()
         };
         let stream_bytes: Vec<u8> = request.into();
-        let addr = (domain.as_str(), 443)
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+        let mut stream = self.initiate_connection(domain, host_name).await?;
 
-        let stream = TcpStream::connect(&addr).await?;
-
-        let domain = DNSNameRef::try_from_ascii_str(&host_name).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid dnsname")
-        })?;
-        // println!("{:?}", domain);
-        let mut stream = self.connector.connect(domain, stream).await?;
         stream.write_all(&stream_bytes).await?;
 
         let mut response = vec![];
@@ -210,7 +268,11 @@ where
         let method: String = self.method.to_string();
         let http_version = "HTTP/1.1";
         let mut header_string = format!("{} {} {}\r\n", method, path, http_version);
-        let host_name = if let Some(host_name) = self.host_name { host_name } else {  self.url.host_str().unwrap().to_string()};
+        let host_name = if let Some(host_name) = self.host_name {
+            host_name
+        } else {
+            self.url.host_str().unwrap().to_string()
+        };
         // println!("{}", host_name);
         header_string.push_str(&format!("Host: {}\r\n", host_name));
         header_string.push_str("User-Agent: dns-util\r\n");

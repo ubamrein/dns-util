@@ -1,5 +1,13 @@
 pub mod http;
-
+pub fn dns_query_over_tls(client: &mut Client, dns_package: DnsPacket) -> Result<DnsPacket, Box<dyn std::error::Error>> {
+    // let mut client = Client::new();
+    let dns_request =
+        DnsRequest::new_with_host("cloudflare-dns.com", "1.1.1.1:853".to_string(), dns_package);
+     let rt = tokio::runtime::Runtime::new()?;
+     rt.block_on(async {
+         client.send_dot(dns_request).await
+     })
+}
 pub fn dns_query(dns_package: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -99,7 +107,7 @@ impl DnsPacketBuilder {
                 length_type: number_of_bytes as usize,
                 data: name_bytes.to_vec(),
                 is_end: false,
-                ptr_bytes: None
+                ptr_bytes: None,
             };
             labels.0.push(label);
         }
@@ -107,7 +115,7 @@ impl DnsPacketBuilder {
             length_type: 0,
             data: vec![],
             is_end: true,
-            ptr_bytes: None
+            ptr_bytes: None,
         });
         let query = Query {
             name: labels,
@@ -154,6 +162,7 @@ impl ToBytes for DnsPacket {
     where
         W: std::io::Write,
     {
+        let start = std::time::Instant::now();
         self.header.write(bytes)?;
         for i in 0..self.header.number_of_questions {
             let q = &self.queries[i as usize];
@@ -171,7 +180,8 @@ impl ToBytes for DnsPacket {
             let a = &self.additional_options[i as usize];
             a.write(bytes)?;
         }
-
+        let end = std::time::Instant::now();
+        // println!("Writing took {}µs", (end-start).as_micros());
         Ok(())
     }
 }
@@ -183,6 +193,7 @@ impl FromBytes for DnsPacket {
     where
         R: Read + Seek,
     {
+        let start = std::time::Instant::now();
         let header = DnsHeader::read(bytes)?;
         let mut queries = vec![];
         let mut answers = vec![];
@@ -206,7 +217,8 @@ impl FromBytes for DnsPacket {
             let a = Answer::read(bytes)?;
             additional_options.push(a);
         }
-
+        let end = std::time::Instant::now();
+        // println!("Parsing took {}µs", (end-start).as_micros());
         Ok(Self {
             header,
             queries,
@@ -376,14 +388,12 @@ impl ToBytes for Answer {
         W: std::io::Write,
     {
         self.name.write(bytes)?;
-        if !self.name.1 && self.name.to_string() != ""{
+        if !self.name.1 && self.name.to_string() != "" {
             if let Some(last) = self.name.0.last() {
                 if last.length_type != 0 {
                     bytes.write_all(&[0x00])?;
                 }
-                 
             }
-           
         }
         bytes.write_all(&self.ty.to_be_bytes())?;
         bytes.write_all(&self.class.to_be_bytes())?;
@@ -399,6 +409,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt::Display;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::net::Ipv4Addr;
+
+use http::DnsRequest;
 
 use crate::http::{Client, HttpMethod, Request};
 
@@ -489,7 +501,9 @@ impl LabelString {
         let mut text = "".to_string();
         for val in &self.0 {
             match val.get_type() {
-                Ok(LabelType::Label | LabelType::End) => text.push_str(&val.get_label().unwrap_or("".to_string())),
+                Ok(LabelType::Label | LabelType::End) => {
+                    text.push_str(&val.get_label().unwrap_or("".to_string()))
+                }
                 Ok(LabelType::Pointer) => unreachable!("We resolved the pointer beforehand"),
                 Err(_) => continue,
             }

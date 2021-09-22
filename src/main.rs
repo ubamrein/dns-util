@@ -1,9 +1,6 @@
 use std::{collections::HashMap, io::Cursor};
 
-use dns_util::{
-    http::{Client, HttpMethod, Request},
-    DnsPacket, FromBytes, RecordType, ToBytes,
-};
+use dns_util::{DnsPacket, FromBytes, RecordType, ToBytes, http::{Client, DnsRequest, HttpMethod, Request}};
 // use reqwest::Client;
 use structopt::StructOpt;
 
@@ -63,10 +60,13 @@ async fn main() {
         headers,
         vec![],
     );
-    let dns_response = client.send(request).await.unwrap().body;
 
-    let response_package =
-        DnsPacket::read(&mut Cursor::new(&dns_response)).expect("response was invalid");
+    let request = DnsRequest::new_with_host("cloudflare-dns.com", "1.1.1.1:853".parse().unwrap(), pkg);
+    // let dns_response = client.send(request).await.unwrap().body;
+    let response_package = client.send_dot(request).await.unwrap();
+
+    // let response_package =
+        // DnsPacket::read(&mut Cursor::new(&dns_response)).expect("response was invalid");
 
     println!("---- DNS ----");
     println!("---- QUERY ----");
