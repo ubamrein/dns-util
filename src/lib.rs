@@ -1,8 +1,39 @@
 pub mod http;
 
+pub fn dns_query(dns_package: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let mut client = Client::new();
+        let mut headers = HashMap::new();
+        headers.insert("accept".to_string(), "application/dns-message".to_string());
+        headers.insert(
+            "content-type".to_string(),
+            "application/dns-message".to_string(),
+        );
+        let request = Request::new_with_host(
+            "dns.google",
+            format!(
+                "{}?dns={}",
+                "https://8.8.8.8/dns-query",
+                base64::encode_config(dns_package, base64::URL_SAFE_NO_PAD)
+            )
+            .parse()
+            .unwrap(),
+            HttpMethod::Get,
+            headers,
+            vec![],
+        );
+        let response = client.send(request).await.unwrap();
+        // println!("{:?}", response.status);
+        let dns_response = response.body;
 
-#[derive(Debug)]
-pub struct LabelString(Vec<Label>);
+        let bytes: Vec<u8> = (&dns_response).to_vec();
+        Ok(bytes)
+    })
+}
+
+#[derive(Clone)]
+pub struct LabelString(Vec<Label>, bool);
 
 pub trait FromBytes {
     type Deserialized;
@@ -22,6 +53,8 @@ pub struct DnsPacket {
     pub header: DnsHeader,
     pub queries: Vec<Query>,
     pub answers: Vec<Answer>,
+    pub authorities: Vec<Answer>,
+    pub additional_options: Vec<Answer>,
 }
 
 pub struct DnsPacketBuilder(DnsPacket);
@@ -43,6 +76,8 @@ impl DnsPacket {
             },
             queries: vec![],
             answers: vec![],
+            authorities: vec![],
+            additional_options: vec![],
         })
     }
 
@@ -63,10 +98,17 @@ impl DnsPacketBuilder {
             let label = Label {
                 length_type: number_of_bytes as usize,
                 data: name_bytes.to_vec(),
-                is_end: false
+                is_end: false,
+                ptr_bytes: None
             };
             labels.0.push(label);
         }
+        labels.0.push(Label {
+            length_type: 0,
+            data: vec![],
+            is_end: true,
+            ptr_bytes: None
+        });
         let query = Query {
             name: labels,
             ty: ty.to_short(),
@@ -79,7 +121,31 @@ impl DnsPacketBuilder {
     pub fn build(mut self) -> DnsPacket {
         self.0.header.number_of_questions = self.0.queries.len() as u16;
         self.0.header.number_of_answers = self.0.answers.len() as u16;
+        self.0.header.number_of_authorities = self.0.authorities.len() as u16;
+        self.0.header.number_of_additional = self.0.additional_options.len() as u16;
         self.0
+    }
+}
+
+impl std::fmt::Debug for LabelString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LabelString")
+            .field(&self.to_string())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Answer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Answer")
+            .field("name", &self.name)
+            .field("ty", &self.ty)
+            .field("class", &self.class)
+            .field("ttl", &self.ttl)
+            .field("rd_length", &self.rd_length)
+            .field("data", &self.data)
+            .field("parsed_data", &String::from_utf8_lossy(&self.parsed_data))
+            .finish()
     }
 }
 
@@ -89,10 +155,20 @@ impl ToBytes for DnsPacket {
         W: std::io::Write,
     {
         self.header.write(bytes)?;
-        for q in &self.queries {
+        for i in 0..self.header.number_of_questions {
+            let q = &self.queries[i as usize];
             q.write(bytes)?;
         }
-        for a in &self.answers {
+        for i in 0..self.header.number_of_answers {
+            let a = &self.answers[i as usize];
+            a.write(bytes)?;
+        }
+        for i in 0..self.header.number_of_authorities {
+            let a = &self.authorities[i as usize];
+            a.write(bytes)?;
+        }
+        for i in 0..self.header.number_of_additional {
+            let a = &self.additional_options[i as usize];
             a.write(bytes)?;
         }
 
@@ -110,23 +186,33 @@ impl FromBytes for DnsPacket {
         let header = DnsHeader::read(bytes)?;
         let mut queries = vec![];
         let mut answers = vec![];
+        let mut authorities = vec![];
+        let mut additional_options = vec![];
 
         for _ in 0..header.number_of_questions {
             let q = Query::read(bytes)?;
             queries.push(q);
         }
-        for _ in 0..(header.number_of_answers
-            + header.number_of_authorities
-            + header.number_of_additional)
-        {
+        for _ in 0..(header.number_of_answers) {
             let a = Answer::read(bytes)?;
             answers.push(a);
+        }
+
+        for _ in 0..header.number_of_authorities {
+            let a = Answer::read(bytes)?;
+            authorities.push(a);
+        }
+        for _ in 0..header.number_of_additional {
+            let a = Answer::read(bytes)?;
+            additional_options.push(a);
         }
 
         Ok(Self {
             header,
             queries,
             answers,
+            authorities,
+            additional_options,
         })
     }
 }
@@ -134,21 +220,21 @@ impl FromBytes for DnsPacket {
 #[derive(Debug)]
 pub struct Query {
     pub name: LabelString,
-    ty: u16,
+    pub ty: u16,
     class: u16,
 }
 
 impl FromBytes for u8 {
-    type  Deserialized = u8;
+    type Deserialized = u8;
 
     fn read<R>(bytes: &mut R) -> Result<Self::Deserialized, Box<dyn std::error::Error>>
     where
-        R: Read + Seek {
-        let mut b = [0;1];
+        R: Read + Seek,
+    {
+        let mut b = [0; 1];
         bytes.read_exact(&mut b)?;
         Ok(b[0])
     }
-    
 }
 
 impl FromBytes for u16 {
@@ -196,21 +282,36 @@ impl ToBytes for Query {
     where
         W: std::io::Write,
     {
-        self.name.write(bytes)?;
+        self.name.write(bytes);
+        // bytes.write_all(&[0x00])?;
         bytes.write_all(&self.ty.to_be_bytes())?;
         bytes.write_all(&self.class.to_be_bytes())?;
         Ok(())
     }
 }
 
-#[derive(Debug)]
 pub struct Answer {
-    name: LabelString,
+    pub name: LabelString,
     ty: u16,
     pub class: u16,
     pub ttl: u32,
     rd_length: u16,
     data: Vec<u8>,
+    pub parsed_data: Vec<u8>,
+}
+
+impl Answer {
+    pub fn new(ip_addr: Ipv4Addr, name: LabelString) -> Answer {
+        Answer {
+            name,
+            ty: 1,
+            class: 1,
+            ttl: 500,
+            rd_length: 4,
+            data: ip_addr.octets().to_vec(),
+            parsed_data: vec![],
+        }
+    }
 }
 
 impl FromBytes for Answer {
@@ -226,38 +327,45 @@ impl FromBytes for Answer {
         let ttl = u32::read(bytes)?;
         let rd_length = u16::read(bytes)?;
         let mut data = vec![0; rd_length as usize];
+
+        let mut parsed_data = vec![0; rd_length as usize];
+        bytes.read_exact(&mut data)?;
+        let mut data = Cursor::new(data);
         // if it is a CNAME parse string instead
         if ty == 5 || ty == 2 {
+            let pos = bytes.stream_position()?;
+            bytes.seek(SeekFrom::Current(-(rd_length as i64)))?;
             let label_string = LabelString::read(bytes)?;
-            data = label_string.get_string().as_bytes().to_vec();
+            parsed_data = label_string.get_string().as_bytes().to_vec();
+            bytes.seek(SeekFrom::Start(pos))?;
         } else if ty == 16 {
             let mut pos = 0 as usize;
             let mut number_of_txt_parts = 0 as usize;
             while pos < rd_length as usize {
-                let length = u8::read(bytes)? as usize;
-                let mut txt_buffer = vec![0;length];
-                bytes.read_exact(&mut txt_buffer)?;
-                &data[pos..(pos+length)].copy_from_slice(&txt_buffer);
+                let length = u8::read(&mut data)? as usize;
+                let mut txt_buffer = vec![0; length];
+                data.read_exact(&mut txt_buffer)?;
+                parsed_data[pos..(pos + length)].copy_from_slice(&txt_buffer);
                 number_of_txt_parts += 1;
                 pos += length + 1;
             }
-            data = (&data[..data.len()-number_of_txt_parts]).to_vec();
+            parsed_data = (&parsed_data[..parsed_data.len() - number_of_txt_parts]).to_vec();
+        } else if ty == 15 {
+            let preference = u16::read(&mut data)?;
+            let label_string = LabelString::read(&mut data)?;
+            parsed_data = format!("{} {}", preference, label_string)
+                .as_bytes()
+                .to_vec();
         }
-        else if ty == 15 {
-            let preference = u16::read(bytes)?;
-            let label_string = LabelString::read(bytes)?;
-            data = format!("{} {}", preference, label_string).as_bytes().to_vec();
-        } 
-        else {
-            bytes.read_exact(&mut data)?;
-        }
+
         Ok(Self {
             name,
             ty,
             class,
             ttl,
             rd_length,
-            data,
+            data: data.into_inner(),
+            parsed_data,
         })
     }
 }
@@ -268,6 +376,15 @@ impl ToBytes for Answer {
         W: std::io::Write,
     {
         self.name.write(bytes)?;
+        if !self.name.1 && self.name.to_string() != ""{
+            if let Some(last) = self.name.0.last() {
+                if last.length_type != 0 {
+                    bytes.write_all(&[0x00])?;
+                }
+                 
+            }
+           
+        }
         bytes.write_all(&self.ty.to_be_bytes())?;
         bytes.write_all(&self.class.to_be_bytes())?;
         bytes.write_all(&self.ttl.to_be_bytes())?;
@@ -278,8 +395,12 @@ impl ToBytes for Answer {
 }
 
 impl Query {}
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Display;
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::net::Ipv4Addr;
+
+use crate::http::{Client, HttpMethod, Request};
 
 impl Answer {
     pub fn get_record_type(&self) -> Result<RecordType, Box<dyn std::error::Error>> {
@@ -302,13 +423,19 @@ impl Answer {
                 let ip_address = u128::from_be_bytes(ip_address);
                 Ok(RecordType::AAAA(ip_address))
             }
-            5 => {
-                Ok(RecordType::CNAME(String::from_utf8(self.data.clone()).unwrap()))
-            }
-            15 => Ok(RecordType::MX(String::from_utf8(self.data.clone()).unwrap())),
-            2 => Ok(RecordType::NS(String::from_utf8(self.data.clone()).unwrap())),
+            5 => Ok(RecordType::CNAME(
+                String::from_utf8(self.parsed_data.clone()).unwrap(),
+            )),
+            15 => Ok(RecordType::MX(
+                String::from_utf8(self.parsed_data.clone()).unwrap(),
+            )),
+            2 => Ok(RecordType::NS(
+                String::from_utf8(self.parsed_data.clone()).unwrap(),
+            )),
             6 => Ok(RecordType::SOA(self.data.clone())),
-            16 => Ok(RecordType::TXT(String::from_utf8(self.data.clone())?)),
+            16 => Ok(RecordType::TXT(String::from_utf8(
+                self.parsed_data.clone(),
+            )?)),
             _ => Err("not implemented".into()),
         }
     }
@@ -323,20 +450,20 @@ impl FromBytes for LabelString {
     {
         let mut labels = LabelString::new();
         loop {
-           
             let label: Label = Label::read(bytes)?;
             let len = label.length_type;
             labels.0.push(label.clone());
-           
+            if label.ptr_bytes.is_some() {
+                labels.1 = true;
+            }
             if label.is_end {
                 break;
             }
             match label.get_type() {
                 Ok(LabelType::End) => break,
                 Ok(LabelType::Label) if len == 0 => break,
-                _ => continue
+                _ => continue,
             }
-            
         }
         Ok(labels)
     }
@@ -349,23 +476,22 @@ impl ToBytes for LabelString {
         for k in &self.0 {
             k.write(bytes)?;
         }
-        bytes.write_all(&[0u8])?;
+        // bytes.write_all(&[0u8])?;
         Ok(())
     }
 }
 
 impl LabelString {
     pub fn new() -> Self {
-        Self(Vec::new())
+        Self(Vec::new(), false)
     }
     pub fn get_string(&self) -> String {
-        
         let mut text = "".to_string();
         for val in &self.0 {
             match val.get_type() {
-                Ok(LabelType::Label | LabelType::End) => text.push_str(&val.get_label().unwrap()),
+                Ok(LabelType::Label | LabelType::End) => text.push_str(&val.get_label().unwrap_or("".to_string())),
                 Ok(LabelType::Pointer) => unreachable!("We resolved the pointer beforehand"),
-                Err(_) => continue
+                Err(_) => continue,
             }
             text.push_str(".");
         }
@@ -406,7 +532,8 @@ impl FromBytes for Label {
                 let label = Label {
                     length_type: label_string.len() as usize,
                     data: label_string.as_bytes().to_vec(),
-                    is_end: true
+                    is_end: true,
+                    ptr_bytes: Some([first[0], second[0]]),
                 };
                 bytes.seek(SeekFrom::Start(pos as u64))?;
                 label
@@ -414,10 +541,12 @@ impl FromBytes for Label {
                 let length = (first[0] & 0b0011_1111) as usize;
                 let mut buf = vec![0; length];
                 bytes.read_exact(&mut buf)?;
+
                 Label {
                     length_type: first[0] as usize,
                     data: buf,
-                    is_end: false
+                    is_end: false,
+                    ptr_bytes: None,
                 }
             },
         )
@@ -429,8 +558,12 @@ impl ToBytes for Label {
     where
         W: std::io::Write,
     {
-        bytes.write_all(&[self.length_type as u8])?;
-        bytes.write_all(&self.data)?;
+        if let Some(ptr_data) = self.ptr_bytes {
+            bytes.write_all(&ptr_data)?;
+        } else {
+            bytes.write_all(&[self.length_type as u8])?;
+            bytes.write_all(&self.data)?;
+        }
         Ok(())
     }
 }
@@ -466,7 +599,8 @@ impl RecordType {
 pub struct Label {
     length_type: usize,
     data: Vec<u8>,
-    is_end: bool
+    is_end: bool,
+    ptr_bytes: Option<[u8; 2]>,
 }
 
 impl Display for Label {
@@ -486,13 +620,14 @@ impl Label {
 
     pub fn get_type(&self) -> Result<LabelType, Box<dyn std::error::Error>> {
         match (self.length_type & 0b1100_0000) >> 6 {
-             _ if self.is_end => Ok(LabelType::Label),
+            _ if self.is_end => Ok(LabelType::Label),
             0b00 => Ok(LabelType::Label),
             0b11 => Ok(LabelType::Pointer),
             _ => Err(format!(
                 "Label can only have two types {:b}",
-                (self.length_type & 0b1100_0000) >> 6).into()
-            ),
+                (self.length_type & 0b1100_0000) >> 6
+            )
+            .into()),
         }
     }
 }
@@ -501,17 +636,17 @@ impl Label {
 pub enum LabelType {
     Label,
     Pointer,
-    End
+    End,
 }
 
 #[derive(Debug)]
 pub struct DnsHeader {
     transaction_id: u16,
     flags: u16,
-    number_of_questions: u16,
-    number_of_answers: u16,
-    number_of_authorities: u16,
-    number_of_additional: u16,
+    pub number_of_questions: u16,
+    pub number_of_answers: u16,
+    pub number_of_authorities: u16,
+    pub number_of_additional: u16,
 }
 
 impl ToBytes for DnsHeader {
@@ -555,6 +690,12 @@ impl FromBytes for DnsHeader {
 }
 
 impl DnsHeader {
+    pub fn set_message_type(&mut self, ty: MessageType) {
+        match ty {
+            MessageType::Query => self.flags &= 0b0111_1111_1111_1111,
+            MessageType::Response => self.flags |= 0b1000_0000_0000_0000,
+        }
+    }
     pub fn get_message_type(&self) -> MessageType {
         match (self.flags & 0b1000_0000_0000_0000) >> 15 {
             0 => MessageType::Query,

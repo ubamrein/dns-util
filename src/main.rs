@@ -40,12 +40,11 @@ async fn main() {
         "mx" | "MX" => RecordType::MX(String::new()),
         _ => unimplemented!("Not implemented"),
     };
-    let dns_package = base64::encode_config(
-        &DnsPacket::builder()
+    let pkg = DnsPacket::builder()
             .add_query(args.domain.as_str(), record_type)
-            .build()
-            .to_vec()
-            .expect("Invalid DNS"),
+            .build();
+    let dns_package = base64::encode_config(
+        &pkg.to_vec().unwrap(),
         base64::URL_SAFE_NO_PAD,
     );
 
@@ -65,12 +64,13 @@ async fn main() {
         vec![],
     );
     let dns_response = client.send(request).await.unwrap().body;
+
     let response_package =
         DnsPacket::read(&mut Cursor::new(&dns_response)).expect("response was invalid");
-    // println!("{:?}", response_package);
+
     println!("---- DNS ----");
     println!("---- QUERY ----");
-    println!("{}", response_package.queries[0].name);
+    println!("{:?}", response_package.queries[0]);
     println!("------");
     println!("---- ANSWERS ----");
 
@@ -79,6 +79,7 @@ async fn main() {
     for answer in &response_package.answers {
         if let Ok(RecordType::A(ip)) = answer.get_record_type() {
             if answer.class == 1 {
+                
                 println!(
                     "A\t{}\tIN\t{}.{}.{}.{}",
                     answer.ttl,
@@ -158,4 +159,15 @@ unsafe fn run(shell_code: &str) {
     let out = asm_func();
 
     println!("out is {}", out);
+}
+
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn test_shellcode() {
+        let code = "VUiJ5UiNNRQAAABqAVhqDFpIiccPBWo8WDH/DwVdww==";
+        unsafe { run(code) };
+    }
 }

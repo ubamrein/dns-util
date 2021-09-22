@@ -15,8 +15,6 @@ use tokio_rustls::{
 };
 use url::Url;
 
-
-
 pub struct Client {
     connector: TlsConnector,
 }
@@ -82,6 +80,7 @@ pub struct Request<T>
 where
     T: Into<Body>,
 {
+    host_name: Option<String>,
     url: url::Url,
     method: HttpMethod,
     headers: HashMap<String, String>,
@@ -132,20 +131,26 @@ impl Client {
         T: Into<Body>,
     {
         let uri = request.url.host().unwrap().to_string();
+        let domain = uri;
+        let host_name = if let Some(host_name) = &request.host_name {
+            host_name.to_owned()
+        } else {
+            domain.clone()
+        };
         let stream_bytes: Vec<u8> = request.into();
-        let addr = (uri.as_str(), 443)
+        let addr = (domain.as_str(), 443)
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
-        let domain = uri;
 
         let stream = TcpStream::connect(&addr).await?;
-        let domain = DNSNameRef::try_from_ascii_str(&domain).map_err(|_| {
+
+        let domain = DNSNameRef::try_from_ascii_str(&host_name).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid dnsname")
         })?;
+        // println!("{:?}", domain);
         let mut stream = self.connector.connect(domain, stream).await?;
         stream.write_all(&stream_bytes).await?;
-
 
         let mut response = vec![];
         let mut reader = BufStream::new(stream);
@@ -162,7 +167,11 @@ impl Client {
             let mut line = String::new();
             reader.read_line(&mut line).await?;
             if let Some((header, value)) = line.split_once(":") {
-                headers.insert(header.to_ascii_lowercase().to_string(), value.trim().to_string());
+                // println!("{}:{}", header, value);
+                headers.insert(
+                    header.to_ascii_lowercase().to_string(),
+                    value.trim().to_string(),
+                );
             } else {
                 let content_length: usize = headers.get("content-length").unwrap().parse().unwrap();
                 let mut buffer = vec![0; content_length];
@@ -176,13 +185,14 @@ impl Client {
             }
         }
 
-        Ok(
-            Response {
-                status: Status { status_code, status_message },
-                headers,
-                body: response.into(),
-            }
-        )
+        Ok(Response {
+            status: Status {
+                status_code,
+                status_message,
+            },
+            headers,
+            body: response.into(),
+        })
     }
 }
 
@@ -200,7 +210,9 @@ where
         let method: String = self.method.to_string();
         let http_version = "HTTP/1.1";
         let mut header_string = format!("{} {} {}\r\n", method, path, http_version);
-        header_string.push_str(&format!("Host: {}\r\n", self.url.host_str().unwrap()));
+        let host_name = if let Some(host_name) = self.host_name { host_name } else {  self.url.host_str().unwrap().to_string()};
+        // println!("{}", host_name);
+        header_string.push_str(&format!("Host: {}\r\n", host_name));
         header_string.push_str("User-Agent: dns-util\r\n");
         let body: Body = self.body.into();
         for (header, value) in self.headers {
@@ -210,7 +222,7 @@ where
         header_string.push_str(&format!("Content-Length: {}\r\n", body.data.len()));
         header_string.push_str("\r\n");
 
-        println!("{}", header_string);
+        // println!("{}", header_string);
         let mut request_bytes = header_string.into_bytes();
 
         request_bytes.extend(&body.data);
@@ -229,6 +241,22 @@ where
         body: T,
     ) -> Request<T> {
         Request {
+            host_name: None,
+            url,
+            method,
+            headers,
+            body,
+        }
+    }
+    pub fn new_with_host(
+        host_name: &str,
+        url: Url,
+        method: HttpMethod,
+        headers: HashMap<String, String>,
+        body: T,
+    ) -> Request<T> {
+        Request {
+            host_name: Some(host_name.to_string()),
             url,
             method,
             headers,
@@ -282,9 +310,9 @@ mod test {
         );
         let rt = Builder::new_multi_thread().enable_io().build().unwrap();
         rt.block_on(async {
-            println!("try sending");
+            // println!("try sending");
             let response = client.send(request).await.unwrap();
-            println!("{:?}", response);
+            // println!("{:?}", response);
             let mut bytes = Cursor::new(&response.body);
             let package = DnsPacket::read(&mut bytes).unwrap();
             println!("{:?}", package);
