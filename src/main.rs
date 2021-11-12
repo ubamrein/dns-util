@@ -1,6 +1,9 @@
 use std::{collections::HashMap, io::Cursor};
 
-use dns_util::{DnsPacket, FromBytes, RecordType, ToBytes, http::{Client, DnsRequest, HttpMethod, Request}};
+use dns_util::{
+    http::{Client, DnsRequest, HttpMethod, Request},
+    DnsPacket, FromBytes, RecordType, ToBytes,
+};
 // use reqwest::Client;
 use structopt::StructOpt;
 
@@ -14,7 +17,7 @@ struct CliArgs {
         short = "d",
         long = "dns-host",
         help = "dns host to use",
-        default_value = "https://dns.google.com/dns-query"
+        default_value = "https://dns.google/dns-query"
     )]
     dns_host: String,
 
@@ -38,35 +41,16 @@ async fn main() {
         _ => unimplemented!("Not implemented"),
     };
     let pkg = DnsPacket::builder()
-            .add_query(args.domain.as_str(), record_type)
-            .build();
-    let dns_package = base64::encode_config(
-        &pkg.to_vec().unwrap(),
-        base64::URL_SAFE_NO_PAD,
-    );
+        .add_query(args.domain.as_str(), record_type)
+        .build();
 
-    let mut client = Client::new();
-    let mut headers = HashMap::new();
-    headers.insert("accept".to_string(), "application/dns-message".to_string());
-    headers.insert(
-        "content-type".to_string(),
-        "application/dns-message".to_string(),
-    );
-    let request = Request::new(
-        format!("{}?dns={}", args.dns_host, dns_package)
-            .parse()
-            .unwrap(),
-        HttpMethod::Get,
-        headers,
-        vec![],
-    );
+    let client = Client::new();
 
-    let request = DnsRequest::new_with_host("cloudflare-dns.com", "1.1.1.1:853".parse().unwrap(), pkg);
-    // let dns_response = client.send(request).await.unwrap().body;
-    let response_package = client.send_dot(request).await.unwrap();
+    //  Use DNS over TLS
+    // let response_package = dns_over_tls(pkg, client).await;
 
-    // let response_package =
-        // DnsPacket::read(&mut Cursor::new(&dns_response)).expect("response was invalid");
+    // Use DNS over HTTPS
+    let response_package = dns_over_https(pkg, &args, client).await;
 
     println!("---- DNS ----");
     println!("---- QUERY ----");
@@ -79,7 +63,6 @@ async fn main() {
     for answer in &response_package.answers {
         if let Ok(RecordType::A(ip)) = answer.get_record_type() {
             if answer.class == 1 {
-                
                 println!(
                     "A\t{}\tIN\t{}.{}.{}.{}",
                     answer.ttl,
@@ -129,15 +112,48 @@ async fn main() {
             }
         }
     }
-    
-    if args.exec_shellcode {
 
-        println!("\n\n---- Running shell code {} from TXT record ----", shellcode);
+    if args.exec_shellcode {
+        println!(
+            "\n\n---- Running shell code {} from TXT record ----",
+            shellcode
+        );
         unsafe {
-            let shellcode = "SDHbU0i4cmxkIQoAAABQSLhIZWxsbyB3b1C4BAAAAr8BAAAASI00JEjHwg4AAAAPBVhYWLgBAAACww==".to_string();
+            let shellcode =
+                "SDHbU0i4cmxkIQoAAABQSLhIZWxsbyB3b1C4BAAAAr8BAAAASI00JEjHwg4AAAAPBVhYWLgBAAACww=="
+                    .to_string();
             run(&shellcode);
         }
     }
+}
+
+async fn dns_over_tls(pkg: DnsPacket, mut client: Client) -> DnsPacket {
+    let request =
+        DnsRequest::new_with_host("cloudflare-dns.com", "1.1.1.1:853".parse().unwrap(), pkg);
+    let response_package = client.send_dot(request).await.unwrap();
+    response_package
+}
+
+async fn dns_over_https(pkg: DnsPacket, args: &CliArgs, mut client: Client) -> DnsPacket {
+    let dns_package = base64::encode_config(&pkg.to_vec().unwrap(), base64::URL_SAFE_NO_PAD);
+    let mut headers = HashMap::new();
+    headers.insert("accept".to_string(), "application/dns-message".to_string());
+    headers.insert(
+        "content-type".to_string(),
+        "application/dns-message".to_string(),
+    );
+    let request = Request::new(
+        format!("{}?dns={}", args.dns_host, dns_package)
+            .parse()
+            .unwrap(),
+        HttpMethod::Get,
+        headers,
+        vec![],
+    );
+    let dns_response = client.send(request).await.unwrap().body;
+    let response_package =
+    DnsPacket::read(&mut Cursor::new(&dns_response)).expect("response was invalid");
+    response_package
 }
 
 use mmap::{
@@ -149,18 +165,18 @@ use std::mem;
 
 unsafe fn run(shell_code: &str) {
     let shell_code = base64::decode(shell_code).unwrap();
-    let mem_map =  MemoryMap::new(shell_code.len(), &[MapReadable, MapWritable, MapExecutable]).unwrap();
+    let mem_map =
+        MemoryMap::new(shell_code.len(), &[MapReadable, MapWritable, MapExecutable]).unwrap();
     println!("virtual_code_address = {:?}", mem_map.data());
-    
+
     std::ptr::copy(shell_code.as_ptr(), mem_map.data(), shell_code.len());
-    
+
     let asm_func: extern "C" fn() -> u32 = mem::transmute(mem_map.data());
-    
+
     let out = asm_func();
 
     println!("out is {}", out);
 }
-
 
 #[cfg(test)]
 mod test {
@@ -168,6 +184,12 @@ mod test {
     #[test]
     fn test_shellcode() {
         let code = "VUiJ5UiNNRQAAABqAVhqDFpIiccPBWo8WDH/DwVdww==";
+        unsafe { run(code) };
+    }
+    #[test]
+    fn test_rust_shell_code() {
+        let code =
+            "VUiJ5Ugx21NIuHJsZCEKAAAAUEi4SGVsbG8gd29QuAQAAAJIjTQkSMfHAQAAAEjHwg4AAAAPBVhYWF3D";
         unsafe { run(code) };
     }
 }
