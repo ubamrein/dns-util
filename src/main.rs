@@ -119,9 +119,6 @@ async fn main() {
             shellcode
         );
         unsafe {
-            let shellcode =
-                "SDHbU0i4cmxkIQoAAABQSLhIZWxsbyB3b1C4BAAAAr8BAAAASI00JEjHwg4AAAAPBVhYWLgBAAACww=="
-                    .to_string();
             run(&shellcode);
         }
     }
