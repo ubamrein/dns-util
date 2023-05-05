@@ -1,12 +1,13 @@
 pub mod http;
-pub fn dns_query_over_tls(client: &mut Client, dns_package: DnsPacket) -> Result<DnsPacket, Box<dyn std::error::Error>> {
+pub fn dns_query_over_tls(
+    client: &mut Client,
+    dns_package: DnsPacket,
+) -> Result<DnsPacket, Box<dyn std::error::Error>> {
     // let mut client = Client::new();
     let dns_request =
         DnsRequest::new_with_host("cloudflare-dns.com", "1.1.1.1:853".to_string(), dns_package);
-     let rt = tokio::runtime::Runtime::new()?;
-     rt.block_on(async {
-         client.send_dot(dns_request).await
-     })
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async { client.send_dot(dns_request).await })
 }
 pub fn dns_query(dns_package: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Runtime::new()?;
@@ -76,7 +77,7 @@ impl DnsPacket {
         DnsPacketBuilder(DnsPacket {
             header: DnsHeader {
                 transaction_id,
-                flags: 256,
+                flags: 0x0120,
                 number_of_questions: 0,
                 number_of_answers: 0,
                 number_of_authorities: 0,
@@ -123,6 +124,11 @@ impl DnsPacketBuilder {
             class: 1,
         };
         self.0.queries.push(query);
+        self
+    }
+    pub fn add_opt(mut self) -> Self {
+        let answer = Answer::new_opt();
+        self.0.additional_options.push(answer);
         self
     }
 
@@ -324,6 +330,17 @@ impl Answer {
             parsed_data: vec![],
         }
     }
+    pub fn new_opt() -> Answer {
+        Answer {
+            name: LabelString::new(),
+            ty: 41,
+            class: 4096, // UDP payload size
+            ttl: 0,
+            rd_length: 0,
+            data: vec![],
+            parsed_data: vec![],
+        }
+    }
 }
 
 impl FromBytes for Answer {
@@ -395,11 +412,22 @@ impl ToBytes for Answer {
                 }
             }
         }
-        bytes.write_all(&self.ty.to_be_bytes())?;
-        bytes.write_all(&self.class.to_be_bytes())?;
-        bytes.write_all(&self.ttl.to_be_bytes())?;
-        bytes.write_all(&self.rd_length.to_be_bytes())?;
-        bytes.write_all(&self.data)?;
+        if self.ty == 41 {
+            // opt needs another byte
+            bytes.write_all(&[0])?;
+            bytes.write_all(&self.ty.to_be_bytes())?;
+            bytes.write_all(&4096u16.to_be_bytes())?;
+            bytes.write_all(&0u8.to_be_bytes())?;
+            bytes.write_all(&0u8.to_be_bytes())?;
+            bytes.write_all(&0u16.to_be_bytes())?;
+            bytes.write_all(&0u16.to_be_bytes())?;
+        } else {
+            bytes.write_all(&self.ty.to_be_bytes())?;
+            bytes.write_all(&self.class.to_be_bytes())?;
+            bytes.write_all(&self.ttl.to_be_bytes())?;
+            bytes.write_all(&self.rd_length.to_be_bytes())?;
+            bytes.write_all(&self.data)?;
+        }
         Ok(())
     }
 }
@@ -591,6 +619,7 @@ pub enum RecordType {
     NS(String),
     TXT(String),
     SOA(Vec<u8>),
+    OPT(String, usize, u8, u8, u16, u16),
     ANY,
 }
 
@@ -604,6 +633,7 @@ impl RecordType {
             RecordType::NS(_) => 2,
             RecordType::TXT(_) => 16,
             RecordType::SOA(_) => 61,
+            RecordType::OPT(..) => 41,
             RecordType::ANY => 255,
         }
     }
